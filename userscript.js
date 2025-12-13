@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         评价数据导出
 // @namespace    http://tampermonkey.net/
-// @version      2025-12-25
+// @version      2025-12-26
 // @description  try to take over the world!
 // @author       You
 // @match        https://seller-us.tiktok.com/*
@@ -724,7 +724,12 @@
                 try {
                     reviews = await getReviewDetails(); // 等待抓取弹窗内容
                 } catch (err) {
-                    reviews = await getReviewDetails(); // 等待抓取弹窗内容
+                    await sleep(3000)
+                    try {
+                        reviews = await getReviewDetails(); // 等待抓取弹窗内容
+                    } catch (err) {
+                        return []
+                    }
                 }
                 console.log('抓取到的评论:', reviews);
                 await sleep(300);
