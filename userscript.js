@@ -1,10 +1,11 @@
 // ==UserScript==
 // @name         评价数据导出
 // @namespace    http://tampermonkey.net/
-// @version      2025-12-23
+// @version      2025-12-25
 // @description  try to take over the world!
 // @author       You
 // @match        https://seller-us.tiktok.com/*
+// @match        https://seller.us.tiktokshopglobalselling.com/*
 // @icon         https://www.google.com/s2/favicons?sz=64&domain=tiktok.com
 // @grant        GM.setValue
 // @grant        GM.getValue
@@ -64,9 +65,9 @@
         // 清空全局变量
         isWorking = false;
         tableData = [];
-
+        await setWorking(false)
         // 清空持久化数据
-        await GM.setValue("isWorking", false);
+        // await GM.setValue("isWorking", false);
         await GM.setValue("tableData", []);
 
         // 恢复按钮 UI 状态
@@ -192,58 +193,64 @@
 
     /**
      * 获取 Review Details 弹窗内容
-     * @returns {Promise<string[]>} - 弹窗中抓取的文本数组
+     * @returns {Promise<Array<{author: string, time: string, content: string}>>}
      */
     async function getReviewDetails() {
-        try {
-            // 等待弹窗出现
-            const drawer = await waitForElement('.core-drawer');
+        // 等待弹窗出现
+        const drawer = await waitForElement('.core-drawer');
 
-            // 找到标题为 "Review Details" 的元素
-            const title = Array.from(drawer.querySelectorAll('*'))
-                .find(el => el.childElementCount === 0 && el.textContent.trim() === 'Review Details');
+        // 校验是否是 Review Details 弹窗
+        const hasReviewTitle = Array.from(
+            drawer.querySelectorAll('h1, h2, h3, div, span')
+        ).some(el => {
+            const text = el.textContent?.trim();
+            return text === 'Review Details' || text === '评价详情';
+        });
 
-            if (!title) {
-                console.warn('找不到 Review Details 元素');
-                return [];
-            }
-
-            // 等待 DOM 稳定，可以根据实际情况加延迟
-            await new Promise(resolve => setTimeout(resolve, 1000));
-
-            // 获取每条评论的容器
-            await waitForChildElement(drawer, '.mt-8')
-
-            const reviewContainers = Array.from(drawer.querySelectorAll('.mt-8'))
-                .filter(el => el.classList.length === 1 && el.classList.contains('mt-8'));
-            const reviews = Array.from(reviewContainers).map(container => {
-                // 评论者
-                const authorEl = container.querySelector('.text-p3-regular.text-neutral-text3');
-                const author = authorEl ? authorEl.textContent.trim() : '';
-
-                // 评论时间
-                const timeEl = container.querySelector('p.text-body-m-regular span');
-                let time = timeEl ? timeEl.textContent.trim() : '';
-                time = dayjs(time).format('YYYY-MM-DD HH:mm:ss');
-
-
-                // 评论内容
-                const contentEl = container.querySelector('.text-p3-regular.text-neutral-text1.mt-4.whitespace-pre-line');
-                const content = contentEl ? contentEl.textContent.trim() : '';
-
-                return { author, time, content };
-            });
-
-            // 获取内容后再关闭弹窗
-            const close = await closeDrawerWithRetry(drawer)
-            if (!close) {
-                await destroyDrawer(drawer)
-            }
-            return reviews;
-        } catch (err) {
-            throw err
+        if (!hasReviewTitle) {
+            console.warn('当前弹窗不是 Review Details');
+            return [];
         }
+
+        // 等待评论节点出现（代替 setTimeout）
+        await waitForChildElement(drawer, '.mt-8');
+
+        const reviewContainers = Array.from(
+            drawer.querySelectorAll('.mt-8')
+        ).filter(el => el.classList.length === 1);
+
+        const reviews = reviewContainers.map(container => {
+            const author =
+                container
+                    .querySelector('.text-p3-regular.text-neutral-text3')
+                    ?.textContent
+                    ?.trim() || '';
+
+            const time =
+                container
+                    .querySelector('p.text-body-m-regular span')
+                    ?.textContent
+                    ?.trim() || '';
+
+            const content =
+                container
+                    .querySelector(
+                        '.text-p3-regular.text-neutral-text1.mt-4.whitespace-pre-line'
+                    )
+                    ?.textContent
+                    ?.trim() || '';
+
+            return { author, time, content };
+        });
+
+        // 关闭弹窗
+        if (!(await closeDrawerWithRetry(drawer))) {
+            await destroyDrawer(drawer);
+        }
+
+        return reviews;
     }
+
 
     async function destroyDrawer(drawer) {
         if (!drawer) return false;
@@ -296,6 +303,14 @@
         return location.href.startsWith("https://seller-us.tiktok.com/order");
     }
 
+    function isGlobalRatingPage() {
+        return location.href.startsWith("https://seller.us.tiktokshopglobalselling.com/product/rating");
+    }
+
+    function isGlobalOrderPage() {
+        return location.href.startsWith("https://seller.us.tiktokshopglobalselling.com/order");
+    }
+
     function showRunningOverlay() {
         if (overlayEl) return; // 避免重复创建
 
@@ -330,26 +345,83 @@
         overlayEl = null;
         document.body.style.overflow = ""; // 恢复滚动
     }
+
+    function getCurrentSite() {
+        const hostname = window.location.hostname;
+
+        // 精确匹配两个站点
+        if (hostname === "seller-us.tiktok.com") {
+            return "tiktok_us_seller"; // 美国本土卖家站点
+        }
+
+        if (hostname === "seller.us.tiktokshopglobalselling.com") {
+            return "tiktok_global_seller"; // 全球卖家站点
+        }
+
+        // 如果是其他 TikTok 卖家子域名
+        if (hostname.includes("tiktok.com")) {
+            return "other_tiktok_seller";
+        }
+
+        return "unknown";
+    }
+
     // =======================
     // ====== Excel 导出 ======
     // =======================
+    function exportToExcel(data) {
+        if (!data || data.length === 0) {
+            throw "错误：没有获取到任何数据";
+        }
+
+        const ws = XLSX.utils.aoa_to_sheet(data);
+        const wb = XLSX.utils.book_new();
+        XLSX.utils.book_append_sheet(wb, ws, "Ratings");
+
+        const fileName = `ratings_${dayjs().format("YYYYMMDD_HHmmss")}.xlsx`;
+        XLSX.writeFile(wb, fileName);
+    }
+
     async function exportExcel() {
         showRunningOverlay();
-        try {
-            if (isRatingPage() && isWorking) {
-                const headers = [
-                    "Order ID",
-                    "Order Time",
-                    "Product ID",
-                    "Product Name",
-                    "Sku ID",
-                    "Sku Name",
-                    "Rating",
-                    "Review Time",
-                    "Reviews (Text)"
-                ];
 
+        try {
+            const site = getCurrentSite();
+
+            const siteConfig = {
+                tiktok_us_seller: {
+                    isRatingPage,
+                    isOrderPage,
+                    ratingUrl: "https://seller-us.tiktok.com/product/rating",
+                    orderUrl: "https://seller-us.tiktok.com/order",
+                },
+                tiktok_global_seller: {
+                    isRatingPage: isGlobalRatingPage,
+                    isOrderPage: isGlobalOrderPage,
+                    ratingUrl: "https://seller.us.tiktokshopglobalselling.com/product/rating",
+                    orderUrl: "https://seller.us.tiktokshopglobalselling.com/order",
+                },
+            };
+
+            const config = siteConfig[site];
+            if (!config) return;
+
+            const headers = [
+                "Order ID",
+                "Order Time",
+                "Product ID",
+                "Product Name",
+                "Sku ID",
+                "Sku Name",
+                "Rating",
+                "Review Time",
+                "Reviews (Text)"
+            ];
+
+            /** 评分页：采集数据 → 跳转订单页 */
+            if (config.isRatingPage() && isWorking) {
                 await processAllPages(processLists);
+
                 const rows = tableData.map(r => [
                     r.orderId,
                     r.orderTime,
@@ -361,35 +433,32 @@
                     r.reviewTime,
                     r.reviewText
                 ]);
-                // 加表头
-                rows.unshift(headers);
-                await setTableData(rows)
-                // alert("部分数据获取完成，跳转订单页获取订单时间数据...")
-                window.location.href = "https://seller-us.tiktok.com/order";
-            } else if (isOrderPage() && isWorking && tableData.length > 0) {
-                if (tableData.length > 0) {
-                    await fillSearchInBatches(tableData)
-                    const ws = XLSX.utils.aoa_to_sheet(tableData);
-                    const wb = XLSX.utils.book_new();
-                    XLSX.utils.book_append_sheet(wb, ws, "Ratings");
-                    const fileName = `ratings_${dayjs().format('YYYYMMDD_HHmmss')}.xlsx`;
-                    XLSX.writeFile(wb, fileName);
-                    alert("导出完成，请查看浏览器下载页")
-                    await reset()
-                } else {
-                    throw "错误：没有获取到任何数据"
-                }
-            } else {
-                window.location.href = "https://seller-us.tiktok.com/product/rating";
+
+                await setTableData([headers, ...rows]);
+                window.location.href = config.orderUrl;
+                return;
             }
+
+            /** 订单页：补订单时间 → 导出 */
+            if (config.isOrderPage() && isWorking && tableData.length > 0) {
+                await fillSearchInBatches(tableData);
+                exportToExcel(tableData);
+                await reset();
+                alert("导出完成，请查看浏览器下载页");
+                return;
+            }
+
+            /** 兜底：跳转评分页 */
+            window.location.href = config.ratingUrl;
+
         } catch (err) {
-            alert(err)
-            setWorking(false)
-        }
-        finally {
-            hideRunningOverlay()
+            alert(err);
+            await setWorking(false);
+        } finally {
+            hideRunningOverlay();
         }
     }
+
 
     async function fillSearchInBatches(dataTable, batchSize = 10, delay = 1000) {
         for (let i = 1; i < dataTable.length; i += batchSize) {
@@ -400,6 +469,13 @@
                 .filter(id => /^\d+$/.test(id)) // 只保留纯数字
                 .join(";");
 
+            try {
+                await waitForElementDisappear(".core-spin-icon", 30000, 100);
+            } catch (err) {
+                console.warn(err.message);
+            }
+
+            await waitForElement('input[data-tid="m4b_input_search"]', 120000, 1000)
             const input = document.querySelector('input[data-tid="m4b_input_search"]');
             if (!input) {
                 console.warn("找不到输入框");
@@ -416,6 +492,7 @@
             input.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, cancelable: true, key: "Enter", code: "Enter", keyCode: 13, which: 13 }));
             input.dispatchEvent(new KeyboardEvent("keyup", { bubbles: true, cancelable: true, key: "Enter", code: "Enter", keyCode: 13, which: 13 }));
 
+            await sleep(1000)
             // 等待加载完成
             try {
                 await waitForElementDisappear(".core-spin-icon", 30000, 100);
@@ -436,6 +513,8 @@
             if (delay > 0) await new Promise(resolve => setTimeout(resolve, delay));
         }
     }
+
+
     /**
      * 等待指定 selector 的元素消失（display:none 或不在 DOM 中）
      * @param {string} selector - 要等待消失的元素选择器
@@ -474,9 +553,9 @@
 
             // 用 item 的全部文本去掉 orderId，剩下的就是时间
             let orderTime = item.textContent.replace(orderId, "").trim();
-            const parsedDate = dayjs(orderTime, 'MM/DD/YYYY h:mm:ss A');
-            const formattedDate = parsedDate.format('YYYY-MM-DD HH:mm:ss');
-            map[orderId] = formattedDate;
+            // const parsedDate = dayjs(orderTime, 'MM/DD/YYYY h:mm:ss A');
+            // const formattedDate = parsedDate.format('YYYY-MM-DD HH:mm:ss');
+            map[orderId] = orderTime;
         });
         return map;
     }
@@ -638,13 +717,16 @@
 
         async function getReviews(child, reviews) {
             const target = Array.from(child.querySelectorAll('*'))
-                .find(el => el.childElementCount === 0 && el.textContent.trim() === "Review details");
+                .find(el => el.childElementCount === 0 && (el.textContent.trim() === "Review details" || el.textContent.trim() === "评价详情"));
 
             if (target) {
                 target.click(); // 点击展开
-                reviews = await getReviewDetails(); // 等待抓取弹窗内容
+                try {
+                    reviews = await getReviewDetails(); // 等待抓取弹窗内容
+                } catch (err) {
+                    reviews = await getReviewDetails(); // 等待抓取弹窗内容
+                }
                 console.log('抓取到的评论:', reviews);
-                // console.log("已触发点击事件:", target);
                 await sleep(300);
             } else {
                 console.error("在子元素中找不到 Review details");
@@ -655,7 +737,11 @@
 
     async function processAllPages(processLists) {
         while (true) {
+            if (!isWorking) {
+                break;
+            }
             // 获取当前页的列表元素
+            await waitForElement('[data-tid="rating-list"]', 12000, 100)
             const lists = document.querySelectorAll('[data-tid="rating-list"]');
             if (!lists.length) {
                 console.warn('当前页没有列表元素');
