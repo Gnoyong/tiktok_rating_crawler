@@ -10,6 +10,8 @@
 // @grant        GM.getValue
 // @require https://cdn.sheetjs.com/xlsx-0.20.3/package/dist/xlsx.full.min.js
 // @require https://cdn.jsdelivr.net/npm/dayjs@1.11.19/dayjs.min.js
+// @updateURL https://raw.githubusercontent.com/Gnoyong/tiktok_rating_crawler/refs/heads/main/userscript.js
+// @downloadURL https://raw.githubusercontent.com/Gnoyong/tiktok_rating_crawler/refs/heads/main/userscript.js
 // ==/UserScript==
 
 
