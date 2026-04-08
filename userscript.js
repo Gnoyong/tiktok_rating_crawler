@@ -1,937 +1,778 @@
 // ==UserScript==
-// @name         评价数据导出
-// @namespace    http://tampermonkey.net/
-// @version      2025-12-26
-// @description  try to take over the world!
-// @author       You
+// @name         TikTok Seller API Helper
+// @namespace    https://github.com/
+// @version      0.1.0
+// @description  TikTok Seller API helper for user info, order export and download URL
+// @author       you
 // @match        https://seller-us.tiktok.com/*
-// @match        https://seller.us.tiktokshopglobalselling.com/*
-// @icon         https://www.google.com/s2/favicons?sz=64&domain=tiktok.com
-// @grant        GM.setValue
-// @grant        GM.getValue
-// @require https://cdn.sheetjs.com/xlsx-0.20.3/package/dist/xlsx.full.min.js
-// @require https://cdn.jsdelivr.net/npm/dayjs@1.11.19/dayjs.min.js
-// @updateURL https://raw.githubusercontent.com/Gnoyong/tiktok_rating_crawler/refs/heads/main/userscript.js
-// @downloadURL https://raw.githubusercontent.com/Gnoyong/tiktok_rating_crawler/refs/heads/main/userscript.js
+// @match        https://seller.tiktokshopglobalselling.com/*
+// @grant        GM_registerMenuCommand
+// @grant        unsafeWindow
 // ==/UserScript==
 
-
-(async function () {
+(function () {
     'use strict';
-    // =======================
-    // ====== JSDoc 类型提示 ======
-    // =======================
-    /**
-     * @typedef {Object} RatingRecord
-     * @property {string} orderId
-     * @property {string} orderTime
-     * @property {string} productId
-     * @property {string} productName
-     * @property {string} skuId
-     * @property {string} skuName
-     * @property {number} rating
-     * @property {string} reviewTime
-     * @property {string} reviewText
-     */
-    let isWorking = false
-    /** @type {RatingRecord[]} */
-    let tableData = [];
 
-    let isStep1Done = false
+    const pageWindow = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
+    const pageFetch = pageWindow.fetch.bind(pageWindow);
+    const REVIEW_PANEL_ID = 'seller-api-review-panel';
+    const REVIEW_PANEL_STYLE_ID = 'seller-api-review-panel-style';
+    const REVIEW_TIMEZONE = 'America/Los_Angeles';
 
-    let overlayEl = null;
-
-    async function initWorkingState() {
-        isWorking = await GM.getValue("isWorking", false);
-        await setWorking(isWorking); // 刷新界面状态
-        updateDataCount();
+    function getCookie(name) {
+        const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        const m = document.cookie.match(new RegExp('(?:^|; )' + escaped + '=([^;]*)'));
+        return m ? decodeURIComponent(m[1]) : '';
     }
 
-
-    async function initTableData() {
-        tableData = await GM.getValue("tableData", []);
-        console.log("恢复持久化 tableData:", tableData);
-    }
-
-    async function setTableData(data) {
-        tableData = data;
-        await GM.setValue("tableData", data);
-        updateDataCount();
-    }
-
-    async function reset() {
-        console.log("🔄 正在重置状态...");
-        hideRunningOverlay()
-        // 清空全局变量
-        isWorking = false;
-        tableData = [];
-        await setWorking(false)
-        // 清空持久化数据
-        // await GM.setValue("isWorking", false);
-        await GM.setValue("tableData", []);
-
-        // 恢复按钮 UI 状态
-        const btn = document.querySelector("#btn-export-xlsx");
-        if (btn) {
-            btn.disabled = false;
-            btn.innerHTML = "导出 Excel";
-        }
-
-        updateDataCount();
-        console.log("✅ 已重置所有状态");
-    }
-
-
-    // =======================
-    // ====== CRUD 函数 ======
-    // =======================
-    /**
-     * 添加一条记录
-     * @param {RatingRecord} record
-     */
-    function addRecord(record) {
-        tableData.push(record);
-    }
-
-    /**
-     * 获取全部记录
-     * @returns {RatingRecord[]}
-     */
-    function getRecords() {
-        return [...tableData];
-    }
-
-    /**
-     * 根据订单ID查询
-     * @param {string} orderId
-     * @returns {RatingRecord|undefined}
-     */
-    function getRecordByOrderId(orderId) {
-        return tableData.find(r => r.orderId === orderId);
-    }
-
-    /**
-     * 根据订单ID更新记录
-     * @param {string} orderId
-     * @param {Partial<RatingRecord>} newData
-     * @returns {boolean} 是否更新成功
-     */
-    function updateRecord(orderId, newData) {
-        const index = tableData.findIndex(r => r.orderId === orderId);
-        if (index !== -1) {
-            tableData[index] = { ...tableData[index], ...newData };
-            return true;
-        }
-        return false;
-    }
-
-    /**
-     * 删除记录
-     * @param {string} orderId
-     * @returns {boolean} 是否删除成功
-     */
-    function deleteRecord(orderId) {
-        const index = tableData.findIndex(r => r.orderId === orderId);
-        if (index !== -1) {
-            tableData.splice(index, 1);
-            return true;
-        }
-        return false;
-    }
-
-    /**
-     * 清空所有数据
-     */
-    function clearAll() {
-        tableData.length = 0;
-    }
-
-    /**
-     * 等待指定元素出现
-     * @param {string} selector - CSS选择器
-     * @param {number} timeout - 超时时间，单位 ms
-     * @param {number} interval - 轮询间隔，单位 ms
-     * @returns {Promise<Element>} - 找到的元素
-     */
-    function waitForElement(selector, timeout = 5000, interval = 100) {
-        return new Promise((resolve, reject) => {
-            const timer = setInterval(() => {
-                const el = document.querySelector(selector);
-                if (el) {
-                    clearInterval(timer);
-                    resolve(el);
-                }
-            }, interval);
-            setTimeout(() => {
-                clearInterval(timer);
-                reject(new Error("元素超时未出现: " + selector));
-            }, timeout);
+    function withTimeout(promise, ms, label) {
+        const timeoutMs = Number(ms) > 0 ? Number(ms) : 30000;
+        let timer = null;
+        const timeoutPromise = new Promise((_, reject) => {
+            timer = setTimeout(() => reject(new Error(label + '_TIMEOUT')), timeoutMs);
         });
-    }
-
-    function waitForChildElement(parent, selector, timeout = 10000, interval = 100) {
-        return new Promise((resolve, reject) => {
-            const timer = setInterval(() => {
-                const el = parent.querySelector(selector);
-                if (el) {
-                    clearInterval(timer);
-                    resolve(el);
-                }
-            }, interval);
-
-            setTimeout(() => {
-                clearInterval(timer);
-                reject(new Error("子元素超时未出现: " + selector));
-            }, timeout);
+        return Promise.race([promise, timeoutPromise]).finally(() => {
+            if (timer) clearTimeout(timer);
         });
     }
 
     function sleep(ms) {
-        return new Promise(resolve => setTimeout(resolve, ms));
+        return new Promise((resolve) => setTimeout(resolve, ms));
     }
 
+    function toUnixSeconds(value) {
+        if (value === undefined || value === null || value === '') {
+            throw new Error('INVALID_TIME: ' + value);
+        }
+        if (typeof value === 'number') {
+            return value > 1e12 ? Math.floor(value / 1000) : Math.floor(value);
+        }
+        const text = String(value).trim();
+        if (/^\d+$/.test(text)) {
+            const numeric = Number(text);
+            return numeric > 1e12 ? Math.floor(numeric / 1000) : Math.floor(numeric);
+        }
+        return zonedDateTimeToUnixSeconds(text, REVIEW_TIMEZONE);
+    }
 
-    /**
-     * 获取 Review Details 弹窗内容
-     * @returns {Promise<Array<{author: string, time: string, content: string}>>}
-     */
-    async function getReviewDetails() {
-        // 等待弹窗出现
-        const drawer = await waitForElement('.core-drawer');
+    function getOffsetMinutesByTimeZone(timeZone, epochMs) {
+        const parts = new Intl.DateTimeFormat('en-US', {
+            timeZone,
+            timeZoneName: 'shortOffset',
+            hour: '2-digit',
+        }).formatToParts(new Date(epochMs));
+        const name = (parts.find((p) => p.type === 'timeZoneName') || {}).value || 'GMT+0';
+        const match = name.match(/GMT([+-])(\d{1,2})(?::?(\d{2}))?/);
+        if (!match) {
+            return 0;
+        }
+        const sign = match[1] === '-' ? -1 : 1;
+        const hh = Number(match[2] || '0');
+        const mm = Number(match[3] || '0');
+        return sign * (hh * 60 + mm);
+    }
 
-        // 校验是否是 Review Details 弹窗
-        const hasReviewTitle = Array.from(
-            drawer.querySelectorAll('h1, h2, h3, div, span')
-        ).some(el => {
-            const text = el.textContent?.trim();
-            return text === 'Review Details' || text === '评价详情';
-        });
+    function zonedDateTimeToUnixSeconds(value, timeZone) {
+        const m = String(value)
+            .trim()
+            .match(/^(\d{4})-(\d{2})-(\d{2})[T\s](\d{2}):(\d{2})(?::(\d{2}))?$/);
+        if (!m) {
+            const fallback = new Date(String(value)).getTime();
+            if (!Number.isFinite(fallback)) {
+                throw new Error('INVALID_TIME: ' + value);
+            }
+            return Math.floor(fallback / 1000);
+        }
+        const year = Number(m[1]);
+        const month = Number(m[2]);
+        const day = Number(m[3]);
+        const hour = Number(m[4]);
+        const minute = Number(m[5]);
+        const second = Number(m[6] || '0');
 
-        if (!hasReviewTitle) {
-            console.warn('当前弹窗不是 Review Details');
+        const utcGuess = Date.UTC(year, month - 1, day, hour, minute, second);
+        let offset = getOffsetMinutesByTimeZone(timeZone, utcGuess);
+        let epochMs = utcGuess - offset * 60000;
+        const correctedOffset = getOffsetMinutesByTimeZone(timeZone, epochMs);
+        if (correctedOffset !== offset) {
+            epochMs = utcGuess - correctedOffset * 60000;
+        }
+        return Math.floor(epochMs / 1000);
+    }
+
+    function formatReviewTime(value) {
+        const numeric = Number(value);
+        if (!Number.isFinite(numeric) || numeric <= 0) {
+            return '';
+        }
+        const millis = numeric < 1e12 ? numeric * 1000 : numeric;
+        return new Date(millis).toLocaleString();
+    }
+
+    function escapeCsvCell(value) {
+        const text = value === undefined || value === null ? '' : String(value);
+        return '"' + text.replace(/"/g, '""') + '"';
+    }
+
+    function downloadTextFile(filename, content, mimeType) {
+        const blob = new Blob([content], { type: mimeType || 'text/plain;charset=utf-8' });
+        const url = URL.createObjectURL(blob);
+        const anchor = document.createElement('a');
+        anchor.href = url;
+        anchor.download = filename;
+        document.body.appendChild(anchor);
+        anchor.click();
+        anchor.remove();
+        setTimeout(() => URL.revokeObjectURL(url), 1000);
+    }
+
+    function parseCsvNumbers(text, fallback) {
+        if (text === undefined || text === null || String(text).trim() === '') {
+            return fallback || [];
+        }
+        return String(text)
+            .split(',')
+            .map((item) => Number(String(item).trim()))
+            .filter((item) => Number.isFinite(item));
+    }
+
+    function normalizeStarLevels(value, fallback) {
+        if (Array.isArray(value)) {
+            const arr = value
+                .map((item) => Number(item))
+                .filter((item) => Number.isFinite(item) && item >= 1 && item <= 5);
+            return arr.length ? arr : fallback || [];
+        }
+        return parseCsvNumbers(value, fallback);
+    }
+
+    function parseJsonObject(text, label) {
+        const trimmed = String(text || '').trim();
+        if (!trimmed) {
+            return {};
+        }
+        let parsed;
+        try {
+            parsed = JSON.parse(trimmed);
+        } catch (err) {
+            throw new Error(label + ' JSON 解析失败: ' + err.message);
+        }
+        if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+            throw new Error(label + ' 必须是 JSON 对象');
+        }
+        return parsed;
+    }
+
+    function toReviewRows(response) {
+        const list = response?.data?.list;
+        if (!Array.isArray(list)) {
             return [];
         }
+        return list.map((item) => ({
+            order_id: item?.order_id || '',
+            product_id: item?.product_info?.product_id || '',
+            review_time: formatReviewTime(item?.review_time),
+            reviews: item?.review_text || '',
+            rating: item?.star_level ?? '',
+        }));
+    }
 
-        // 等待评论节点出现（代替 setTimeout）
-        await waitForChildElement(drawer, '.mt-8');
-
-        const reviewContainers = Array.from(
-            drawer.querySelectorAll('.mt-8')
-        ).filter(el => el.classList.length === 1);
-
-        const reviews = reviewContainers.map(container => {
-            const author =
-                container
-                    .querySelector('.text-p3-regular.text-neutral-text3')
-                    ?.textContent
-                    ?.trim() || '';
-
-            const time =
-                container
-                    .querySelector('p.text-body-m-regular span')
-                    ?.textContent
-                    ?.trim() || '';
-
-            const content =
-                container
-                    .querySelector(
-                        '.text-p3-regular.text-neutral-text1.mt-4.whitespace-pre-line'
-                    )
-                    ?.textContent
-                    ?.trim() || '';
-
-            return { author, time, content };
+    function reviewRowsToCsv(rows) {
+        const header = ['order_id', 'product_id', 'review_time', 'reviews', 'rating'];
+        const lines = [header.map(escapeCsvCell).join(',')];
+        rows.forEach((row) => {
+            lines.push(
+                [row.order_id, row.product_id, row.review_time, row.reviews, row.rating]
+                    .map(escapeCsvCell)
+                    .join(',')
+            );
         });
+        return lines.join('\n');
+    }
 
-        // 关闭弹窗
-        if (!(await closeDrawerWithRetry(drawer))) {
-            await destroyDrawer(drawer);
+    function defaultDateTimeLocal(offsetMs) {
+        const date = new Date(Date.now() + offsetMs);
+        const local = new Date(date.getTime() - date.getTimezoneOffset() * 60000);
+        return local.toISOString().slice(0, 16);
+    }
+
+    function getDatePartsInTimeZone(date, timeZone) {
+        const parts = new Intl.DateTimeFormat('en-CA', {
+            timeZone,
+            year: 'numeric',
+            month: '2-digit',
+            day: '2-digit',
+        }).formatToParts(date);
+        const year = (parts.find((p) => p.type === 'year') || {}).value;
+        const month = (parts.find((p) => p.type === 'month') || {}).value;
+        const day = (parts.find((p) => p.type === 'day') || {}).value;
+        return { year, month, day };
+    }
+
+    function defaultDateTimeBoundary(offsetDays, isEnd) {
+        const shifted = new Date(Date.now() + offsetDays * 24 * 60 * 60 * 1000);
+        const parts = getDatePartsInTimeZone(shifted, REVIEW_TIMEZONE);
+        const yyyy = String(parts.year);
+        const mm = String(parts.month).padStart(2, '0');
+        const dd = String(parts.day).padStart(2, '0');
+        return yyyy + '-' + mm + '-' + dd + 'T' + (isEnd ? '23:59:59' : '00:00:00');
+    }
+
+    function normalizeDateBoundary(value, isEnd) {
+        const text = String(value || '').trim();
+        const datePart = /^\d{4}-\d{2}-\d{2}/.test(text) ? text.slice(0, 10) : '';
+        if (!datePart) {
+            throw new Error('INVALID_DATE: ' + value);
         }
-
-        return reviews;
+        return datePart + 'T' + (isEnd ? '23:59:59' : '00:00:00');
     }
 
-
-    async function destroyDrawer(drawer) {
-        if (!drawer) return false;
-
-        try {
-            drawer.remove(); // 从 DOM 中移除
-            // 可选：等待确保元素彻底消失
-            await waitForElementDisappear('.core-drawer', 5000, 100)
-                .catch(() => { }); // 超时忽略
-            console.log('弹窗已被销毁');
-            return true;
-        } catch (err) {
-            console.error('销毁弹窗失败', err);
-            return false;
-        }
+    function detectEnv() {
+        const host = location.hostname;
+        const isUs = host === 'seller-us.tiktok.com';
+        return {
+            baseUrl: location.origin,
+            timezoneName: isUs ? 'America/Los_Angeles' : 'Asia/Hong_Kong',
+            appName: isUs ? 'i18n_ecom_shop' : 'i18n_ecom_alliance',
+            language: 'en',
+            locale: 'en',
+            aid: getCookie('app_id_unified_seller_env') || (isUs ? '4068' : '6556'),
+            oecSellerId: getCookie('oec_seller_id_unified_seller_env') || '',
+            shopRegion: 'US',
+        };
     }
 
-    async function closeDrawerWithRetry(drawer, maxRetries = 3, interval = 500) {
-        const closeBtn = drawer.querySelector('.core-drawer-close-icon');
-        if (!closeBtn) {
-            console.warn('找不到关闭按钮');
-            return false;
-        }
-
-        for (let attempt = 1; attempt <= maxRetries; attempt++) {
-            closeBtn.click();
-            try {
-                await waitForElementDisappear('.core-drawer', 10000, 100);
-                console.log('弹窗已成功关闭');
-                return true; // 成功关闭
-            } catch (err) {
-                console.warn(`尝试第 ${attempt} 次关闭弹窗失败`);
-                if (attempt < maxRetries) {
-                    await new Promise(resolve => setTimeout(resolve, interval)); // 等待一段时间再重试
-                }
-            }
-        }
-
-        console.error('弹窗关闭失败，已达最大重试次数');
-        return false;
+    function buildCommonParams(env, overrides) {
+        const fp = getCookie('s_v_web_id') || '';
+        return Object.assign(
+            {
+                locale: env.locale,
+                language: env.language,
+                aid: env.aid,
+                app_name: env.appName,
+                oec_seller_id: env.oecSellerId,
+                fp,
+                device_platform: 'web',
+                cookie_enabled: 'true',
+                screen_width: String(window.screen.width || 1920),
+                screen_height: String(window.screen.height || 1080),
+                browser_language: navigator.language || 'en-US',
+                browser_platform: navigator.platform || 'Win32',
+                browser_name: 'Mozilla',
+                browser_version: navigator.userAgent,
+                browser_online: String(navigator.onLine),
+                timezone_name: env.timezoneName,
+                shop_region: env.shopRegion,
+            },
+            overrides || {}
+        );
     }
 
-
-
-    function isRatingPage() {
-        return location.href.startsWith("https://seller-us.tiktok.com/product/rating");
-    }
-
-    function isOrderPage() {
-        return location.href.startsWith("https://seller-us.tiktok.com/order");
-    }
-
-    function isGlobalRatingPage() {
-        return location.href.startsWith("https://seller.us.tiktokshopglobalselling.com/product/rating");
-    }
-
-    function isGlobalOrderPage() {
-        return location.href.startsWith("https://seller.us.tiktokshopglobalselling.com/order");
-    }
-
-    function showRunningOverlay() {
-        if (overlayEl) return; // 避免重复创建
-
-        overlayEl = document.createElement("div");
-        overlayEl.id = "running-overlay";
-        Object.assign(overlayEl.style, {
-            position: "fixed",
-            top: "0",
-            left: "0",
-            width: "100%",
-            height: "100%",
-            backgroundColor: "rgba(0,0,0,0.6)",
-            color: "#fff",
-            fontSize: "24px",
-            fontWeight: "bold",
-            display: "flex",
-            justifyContent: "center",
-            alignItems: "center",
-            zIndex: 999999998, // 比面板低一层
-            userSelect: "none",
-            pointerEvents: "all"
-        });
-        overlayEl.innerText = "脚本运行中，请勿操作";
-
-        document.body.style.overflow = "hidden"; // 禁止滚动
-        document.body.appendChild(overlayEl);
-    }
-
-    function hideRunningOverlay() {
-        if (!overlayEl) return;
-        overlayEl.remove();
-        overlayEl = null;
-        document.body.style.overflow = ""; // 恢复滚动
-    }
-
-    function getCurrentSite() {
-        const hostname = window.location.hostname;
-
-        // 精确匹配两个站点
-        if (hostname === "seller-us.tiktok.com") {
-            return "tiktok_us_seller"; // 美国本土卖家站点
-        }
-
-        if (hostname === "seller.us.tiktokshopglobalselling.com") {
-            return "tiktok_global_seller"; // 全球卖家站点
-        }
-
-        // 如果是其他 TikTok 卖家子域名
-        if (hostname.includes("tiktok.com")) {
-            return "other_tiktok_seller";
-        }
-
-        return "unknown";
-    }
-
-    // =======================
-    // ====== Excel 导出 ======
-    // =======================
-    function exportToExcel(data) {
-        if (!data || data.length === 0) {
-            throw "错误：没有获取到任何数据";
-        }
-
-        const ws = XLSX.utils.aoa_to_sheet(data);
-        const wb = XLSX.utils.book_new();
-        XLSX.utils.book_append_sheet(wb, ws, "Ratings");
-
-        const fileName = `ratings_${dayjs().format("YYYYMMDD_HHmmss")}.xlsx`;
-        XLSX.writeFile(wb, fileName);
-    }
-
-    async function exportExcel() {
-        showRunningOverlay();
-
-        try {
-            const site = getCurrentSite();
-
-            const siteConfig = {
-                tiktok_us_seller: {
-                    isRatingPage,
-                    isOrderPage,
-                    ratingUrl: "https://seller-us.tiktok.com/product/rating",
-                    orderUrl: "https://seller-us.tiktok.com/order",
-                },
-                tiktok_global_seller: {
-                    isRatingPage: isGlobalRatingPage,
-                    isOrderPage: isGlobalOrderPage,
-                    ratingUrl: "https://seller.us.tiktokshopglobalselling.com/product/rating",
-                    orderUrl: "https://seller.us.tiktokshopglobalselling.com/order",
-                },
-            };
-
-            const config = siteConfig[site];
-            if (!config) return;
-
-            const headers = [
-                "Order ID",
-                "Order Time",
-                "Product ID",
-                "Product Name",
-                "Sku ID",
-                "Sku Name",
-                "Rating",
-                "Review Time",
-                "Reviews (Text)"
-            ];
-
-            /** 评分页：采集数据 → 跳转订单页 */
-            if (config.isRatingPage() && isWorking) {
-                await processAllPages(processLists);
-
-                const rows = tableData.map(r => [
-                    r.orderId,
-                    r.orderTime,
-                    r.productId,
-                    r.productName,
-                    r.skuId,
-                    r.skuName,
-                    r.rating,
-                    r.reviewTime,
-                    r.reviewText
-                ]);
-
-                await setTableData([headers, ...rows]);
-                window.location.href = config.orderUrl;
-                return;
-            }
-
-            /** 订单页：补订单时间 → 导出 */
-            if (config.isOrderPage() && isWorking && tableData.length > 0) {
-                await fillSearchInBatches(tableData);
-                exportToExcel(tableData);
-                await reset();
-                alert("导出完成，请查看浏览器下载页");
-                return;
-            }
-
-            /** 兜底：跳转评分页 */
-            window.location.href = config.ratingUrl;
-
-        } catch (err) {
-            alert(err);
-            await setWorking(false);
-        } finally {
-            hideRunningOverlay();
-        }
-    }
-
-
-    async function fillSearchInBatches(dataTable, batchSize = 10, delay = 1000) {
-        for (let i = 1; i < dataTable.length; i += batchSize) {
-            const batchEnd = Math.min(i + batchSize, dataTable.length);
-            const batch = dataTable.slice(i, batchEnd);
-            const text = batch
-                .map(row => row[0])
-                .filter(id => /^\d+$/.test(id)) // 只保留纯数字
-                .join(";");
-
-            try {
-                await waitForElementDisappear(".core-spin-icon", 30000, 100);
-            } catch (err) {
-                console.warn(err.message);
-            }
-
-            await waitForElement('input[data-tid="m4b_input_search"]', 120000, 1000)
-            const input = document.querySelector('input[data-tid="m4b_input_search"]');
-            if (!input) {
-                console.warn("找不到输入框");
-                return;
-            }
-
-            // React onChange
-            const reactFiber = input._reactInternals || input[Object.keys(input).find(k => k.startsWith("__reactInternalInstance"))];
-            if (reactFiber?.memoizedProps?.onChange) {
-                reactFiber.memoizedProps.onChange({ target: { value: text } });
-            }
-
-            // 发送 Enter
-            input.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, cancelable: true, key: "Enter", code: "Enter", keyCode: 13, which: 13 }));
-            input.dispatchEvent(new KeyboardEvent("keyup", { bubbles: true, cancelable: true, key: "Enter", code: "Enter", keyCode: 13, which: 13 }));
-
-            await sleep(1000)
-            // 等待加载完成
-            try {
-                await waitForElementDisappear(".core-spin-icon", 30000, 100);
-            } catch (err) {
-                console.warn(err.message);
-            }
-
-            // 获取订单时间映射
-            const orderTimeMap = extractOrderTimeMap();
-
-            // 回写到原数组
-            for (let j = i; j < batchEnd; j++) {
-                const orderId = dataTable[j][0];
-                dataTable[j][1] = orderTimeMap[orderId] || null;
-            }
-
-            // 延迟下一批次
-            if (delay > 0) await new Promise(resolve => setTimeout(resolve, delay));
-        }
-    }
-
-
-    /**
-     * 等待指定 selector 的元素消失（display:none 或不在 DOM 中）
-     * @param {string} selector - 要等待消失的元素选择器
-     * @param {number} timeout - 超时时间，毫秒
-     * @param {number} interval - 检查间隔，毫秒
-     */
-    function waitForElementDisappear(selector, timeout = 5000, interval = 100) {
-        return new Promise((resolve, reject) => {
-            const start = Date.now();
-            const timer = setInterval(() => {
-                const el = document.querySelector(selector);
-                if (!el || getComputedStyle(el).display === "none") {
-                    clearInterval(timer);
-                    resolve();
-                } else if (Date.now() - start > timeout) {
-                    clearInterval(timer);
-                    reject(new Error(`等待元素消失超时: ${selector}`));
-                }
-            }, interval);
-        });
-    }
-
-
-    function extractOrderTimeMap() {
-        const map = {}; // { orderId: timeString }
-
-        // 每条订单外层块（通过实际结构调整 selector）
-        const items = document.querySelectorAll('[data-id="fulfillment.manage_order.order_list_table.order_id"]');
-
-        items.forEach(item => {
-            // 找到 orderId
-            const orderEl = item.querySelector('[data-log_click_for="order_id_link"]');
-            if (!orderEl) return;
-
-            const orderId = orderEl.textContent.trim();
-
-            // 用 item 的全部文本去掉 orderId，剩下的就是时间
-            let orderTime = item.textContent.replace(orderId, "").trim();
-            // const parsedDate = dayjs(orderTime, 'MM/DD/YYYY h:mm:ss A');
-            // const formattedDate = parsedDate.format('YYYY-MM-DD HH:mm:ss');
-            map[orderId] = orderTime;
-        });
-        return map;
-    }
-
-    /**
-     * 获取分页容器
-     */
-    function getPagination() {
-        return document.querySelector('.core-pagination-list');
-    }
-
-    /**
-     * 获取所有页码元素（不包含上一页/下一页按钮）
-     */
-    function getPageItems() {
-        const pagination = getPagination();
-        if (!pagination) return [];
-        return Array.from(pagination.querySelectorAll('.core-pagination-item'))
-            .filter(el => !el.classList.contains('core-pagination-item-prev') && !el.classList.contains('core-pagination-item-next'));
-    }
-
-    /**
-     * 获取当前页码（数字）
-     */
-    function getCurrentPage() {
-        const active = getPageItems().find(el => el.classList.contains('core-pagination-item-active'));
-        return active ? parseInt(active.textContent.trim(), 10) : null;
-    }
-
-    /**
-     * 判断是否有下一页
-     */
-    function hasNextPage() {
-        const pagination = getPagination();
-        if (!pagination) return false;
-        const nextBtn = pagination.querySelector('.core-pagination-item-next');
-        return nextBtn && !nextBtn.classList.contains('core-pagination-item-disabled');
-    }
-
-    /**
-     * 判断是否有上一页
-     */
-    function hasPrevPage() {
-        const pagination = getPagination();
-        if (!pagination) return false;
-        const prevBtn = pagination.querySelector('.core-pagination-item-prev');
-        return prevBtn && !prevBtn.classList.contains('core-pagination-item-disabled');
-    }
-
-    /**
-     * 跳转到指定页
-     */
-    function goToPage(pageNumber) {
-        const pages = getPageItems();
-        const target = pages.find(el => parseInt(el.textContent.trim(), 10) === pageNumber);
-        if (target) {
-            target.click();
-            console.log(`跳转到第 ${pageNumber} 页`);
-            return true;
-        }
-        console.warn(`找不到第 ${pageNumber} 页`);
-        return false;
-    }
-
-    /**
-     * 下一页
-     */
-    function nextPage() {
-        if (hasNextPage()) {
-            const nextBtn = getPagination().querySelector('.core-pagination-item-next');
-            nextBtn.click();
-            console.log('跳转到下一页');
-            return true;
-        }
-        console.warn('已经是最后一页');
-        return false;
-    }
-
-    /**
-     * 上一页
-     */
-    function prevPage() {
-        if (hasPrevPage()) {
-            const prevBtn = getPagination().querySelector('.core-pagination-item-prev');
-            prevBtn.click();
-            console.log('跳转到上一页');
-            return true;
-        }
-        console.warn('已经是第一页');
-        return false;
-    }
-
-    async function processLists(lists) {
-        for (let index = 0; index < lists.length; index++) {
-            const list = lists[index];
-            console.log(`===== 第 ${index + 1} 个 rating-list =====`);
-
-            // 遍历一级子元素
-            for (let i = 0; i < list.children.length; i++) {
-
-                if (!isWorking) {
-                    break;
-                }
-
-                const child = list.children[i];
-                console.log(`  子元素 ${i + 1}:`, child);
-
-                // 计算星星数量
-                const starCount = child.querySelectorAll('.activeStar-OiHELX').length;
-                console.log(starCount);
-
-                // 查找直接拥有 "Review details" 文本的元素
-                let reviews = []
-                try {
-                    reviews = await getReviews(child, reviews);
-                } catch {
-                    sleep(3000)
-                    reviews = await getReviews(child, reviews);
-                }
-
-                // Order ID
-                const orderElem = child.querySelector('.productItemInfoOrderIdText-pbtT22');
-
-                let orderId = ""
-                if (orderElem) {
-                    // 提取数字部分
-                    const orderIdMatch = orderElem.textContent.match(/\d+/);
-                    orderId = orderIdMatch ? orderIdMatch[0] : null;
-                    console.log('Order ID:', orderId);
-                } else {
-                    console.warn('找不到 orderId 元素');
-                }
-
-                // Product ID
-                const productElem = child.querySelector('.productItemInfoProductId-MNDZzz');
-
-                let productId = ""
-                if (productElem) {
-                    // 提取数字部分
-                    const productIdMatch = productElem.textContent.match(/\d+/);
-                    productId = productIdMatch ? productIdMatch[0] : null;
-                    console.log('Product ID:', productId);
-                } else {
-                    console.warn('找不到 productId 元素');
-                }
-
-                addRecord({
-                    orderTime: "",
-                    productId,
-                    orderId,
-                    rating: starCount,
-                    reviewTime: reviews[0]?.time ?? "",
-                    reviewText: reviews[0]?.content ?? ""
-                })
-
-                updateDataCount()
-            }
-        }
-
-        async function getReviews(child, reviews) {
-            const target = Array.from(child.querySelectorAll('*'))
-                .find(el => el.childElementCount === 0 && (el.textContent.trim() === "Review details" || el.textContent.trim() === "评价详情"));
-
-            if (target) {
-                target.click(); // 点击展开
-                try {
-                    reviews = await getReviewDetails(); // 等待抓取弹窗内容
-                } catch (err) {
-                    await sleep(3000)
-                    try {
-                        reviews = await getReviewDetails(); // 等待抓取弹窗内容
-                    } catch (err) {
-                        return []
+    function createSellerApi() {
+        const env = detectEnv();
+
+        function buildUrl(path, params) {
+            const fullPath = path.startsWith('/') ? path : '/' + path;
+            const url = new URL(env.baseUrl + fullPath);
+            if (params && typeof params === 'object') {
+                Object.entries(params).forEach(([k, v]) => {
+                    if (v !== undefined && v !== null && v !== '') {
+                        url.searchParams.set(k, String(v));
                     }
-                }
-                console.log('抓取到的评论:', reviews);
-                await sleep(300);
-            } else {
-                console.error("在子元素中找不到 Review details");
+                });
             }
-            return reviews;
+            return url.toString();
         }
-    }
 
-    async function processAllPages(processLists) {
-        while (true) {
-            if (!isWorking) {
-                break;
-            }
-            // 获取当前页的列表元素
-            await waitForElement('[data-tid="rating-list"]', 12000, 100)
-            const lists = document.querySelectorAll('[data-tid="rating-list"]');
-            if (!lists.length) {
-                console.warn('当前页没有列表元素');
-                break;
-            }
+        async function request(path, options) {
+            const method = (options && options.method) || 'GET';
+            const body = options && options.body;
+            const timeoutMs = (options && options.timeoutMs) || 30000;
+            const onlyAdditional = Boolean(options && options.onlyAdditional);
+            const additionalParams = (options && options.additionalParams) || {};
 
-            // 处理当前页的列表
-            await processLists(lists);
+            const params = onlyAdditional
+                ? additionalParams
+                : buildCommonParams(env, additionalParams);
 
-            // 如果没有下一页，结束循环
-            if (!hasNextPage()) {
-                console.log('已经是最后一页，处理完成');
-                break;
-            }
+            const url = buildUrl(path, params);
+            const headers = new Headers((options && options.headers) || { 'content-type': 'application/json' });
 
-            // 跳转到下一页
-            nextPage();
-
-            // 等待页面 DOM 刷新，可以适当延迟
-            await new Promise(resolve => setTimeout(resolve, 1500));
-        }
-    }
-
-    // 更新按钮状态
-    async function setWorking(flag) {
-        isWorking = flag;
-        await GM.setValue("isWorking", flag);
-        const btn = document.querySelector("#btn-export-xlsx");
-        if (!btn) return;
-        if (flag) {
-            btn.innerHTML = `<span class="spinner"></span>处理中...`;
-            btn.disabled = true;
-        } else {
-            btn.innerHTML = "导出 Excel";
-            btn.disabled = false;
-        }
-    }
-
-
-    function createFloatingPanel() {
-        const panel = document.createElement("div");
-        panel.id = "export-panel";
-        panel.style.zIndex = "9999"
-
-        panel.innerHTML = `
-        <div style="
-            font-size: 14px;
-            font-weight: bold;
-            margin-bottom: 8px;
-        ">评价数据导出</div>
-        <div id="data-count" style="
-            font-size:12px;
-            margin-bottom:8px;
-            color:#333;
-        ">已抓取：0 条</div>
-        <button id="btn-export-xlsx" style="
-            display: block;
-            width: 100%;
-            padding: 6px 10px;
-            background: #4CAF50;
-            border: none;
-            color: white;
-            border-radius: 4px;
-            cursor: not-allowed;
-        " disabled>导出 Excel</button>
-            <button id="btn-reset" style="
-        margin-top:8px;
-        width:100%;
-        padding:6px 10px;
-        background:#f44336;
-        border:none;
-        color:white;
-        border-radius:4px;
-        cursor:pointer;
-    ">重置</button>
-    `;
-
-        Object.assign(panel.style, {
-            position: "fixed",
-            top: "100px",
-            right: "40px",
-            width: "150px",
-            padding: "12px",
-            background: "white",
-            border: "1px solid #ccc",
-            borderRadius: "8px",
-            zIndex: 999999999,
-            boxShadow: "0 4px 10px rgba(0,0,0,0.15)",
-            cursor: "move",
-            userSelect: "none"
-        });
-
-        document.body.appendChild(panel);
-
-        const btn = document.querySelector("#btn-export-xlsx");
-
-        window.addEventListener("load", () => {
-            btn.disabled = false;
-            btn.style.cursor = "pointer";
-            btn.onclick = async () => {
-                if (isWorking) return;
-                await setWorking(true)
-                await exportExcel(); // 这里放你的导出逻辑
+            const fetchOptions = {
+                method,
+                credentials: 'include',
+                headers,
             };
-        });
 
-        document.querySelector("#btn-reset").onclick = reset;
+            if (body !== undefined && body !== null && method !== 'GET' && method !== 'HEAD') {
+                fetchOptions.body = typeof body === 'string' ? body : JSON.stringify(body);
+            }
 
-        makeDraggable(panel);
+            const response = await withTimeout(pageFetch(url, fetchOptions), timeoutMs, 'FETCH');
+            const text = await response.text();
+            let data;
 
-        // spinner 动画
-        const style = document.createElement("style");
-        style.innerHTML = `
-        @keyframes spin {
-            0% { transform: rotate(0deg); }
-            100% { transform: rotate(360deg); }
+            try {
+                data = text ? JSON.parse(text) : {};
+            } catch (err) {
+                throw new Error('NON_JSON_RESPONSE status=' + response.status + ' body=' + text.slice(0, 300));
+            }
+
+            if (!response.ok) {
+                throw new Error('HTTP_' + response.status + ' ' + JSON.stringify(data));
+            }
+
+            if (typeof data === 'object' && data !== null && 'code' in data && data.code !== 0) {
+                throw new Error('BIZ_' + data.code + ' ' + (data.message || '') + ' ' + JSON.stringify(data));
+            }
+
+            return data;
         }
-        .spinner {
-            display:inline-block;
-            width:16px;
-            height:16px;
-            border:2px solid #fff;
-            border-top:2px solid #4CAF50;
-            border-radius:50%;
-            animation: spin 1s linear infinite;
-            margin-right:6px;
+
+        function toMillis(value) {
+            if (value instanceof Date) return value.getTime();
+            if (typeof value === 'number') return value;
+            const t = new Date(String(value)).getTime();
+            if (!Number.isFinite(t)) {
+                throw new Error('INVALID_TIME: ' + value);
+            }
+            return t;
         }
-    `;
-        document.head.appendChild(style);
+
+        return {
+            env,
+
+            async userInfo() {
+                return request('/passport/account/info/v2/', {
+                    method: 'GET',
+                    onlyAdditional: true,
+                    additionalParams: {
+                        aid: env.aid,
+                        language: env.language,
+                        get_info_type: '2',
+                    },
+                });
+            },
+
+            async getBuyerInfo(orderIds) {
+                if (!Array.isArray(orderIds) || orderIds.length === 0) {
+                    throw new Error('orderIds is required');
+                }
+                return request('/api/v1/fulfillment/na/orders/buyer', {
+                    method: 'POST',
+                    body: { main_order_ids: orderIds },
+                });
+            },
+
+            async getReviewList(options) {
+                const reviewStartTime = toUnixSeconds(options && options.reviewStartTime);
+                const reviewEndTime = toUnixSeconds(options && options.reviewEndTime);
+                const page = Number((options && options.page) || 1);
+                const size = Number((options && options.size) || 10);
+                const starLevels = normalizeStarLevels(options && options.starLevels, [1, 2, 3, 4, 5]);
+                const fuzzyParam = String((options && options.fuzzyParam) || '').trim();
+                const extraQueryParams = Object.assign(
+                    {
+                        msToken: getCookie('msToken') || '',
+                    },
+                    (options && options.extraQueryParams) || {}
+                );
+                const extraBody = (options && options.extraBody) || {};
+
+                const requestOptions = {
+                    method: 'POST',
+                    additionalParams: extraQueryParams,
+                    body: Object.assign(
+                        {
+                            star_level: starLevels.length ? starLevels : [1, 2, 3, 4, 5],
+                            review_start_time: reviewStartTime,
+                            review_end_time: reviewEndTime,
+                            page,
+                            size,
+                        },
+                        extraBody
+                    ),
+                }
+
+                if (fuzzyParam) {
+                    requestOptions.body.fuzzy_param = fuzzyParam;
+                }
+
+                return request('/api/v1/review/biz_backend/list', requestOptions);
+            },
+
+            async getAllReviewRows(options) {
+                const size = Number((options && options.size) || 50);
+                const allRows = [];
+                let page = Number((options && options.page) || 1);
+                let total = Infinity;
+
+                while (allRows.length < total) {
+                    const response = await this.getReviewList(Object.assign({}, options, { page, size }));
+                    const rows = toReviewRows(response);
+                    const responseTotal = Number(response?.data?.total);
+
+                    if (Number.isFinite(responseTotal) && responseTotal >= 0) {
+                        total = responseTotal;
+                    }
+
+                    if (!rows.length) {
+                        break;
+                    }
+
+                    allRows.push(...rows);
+
+                    if (rows.length < size) {
+                        break;
+                    }
+
+                    page += 1;
+                    await sleep(250);
+                }
+
+                return allRows;
+            },
+
+            async exportOrders(startTime, endTime, options) {
+                const startMs = toMillis(startTime);
+                const endMs = toMillis(endTime);
+                const sortInfo = (options && options.sortInfo) || '6';
+                const fileType = (options && options.fileType) || 2;
+
+                const defaultName =
+                    'all_order-' +
+                    new Date(startMs).toISOString().replace(/[-:TZ.]/g, '').slice(0, 14) +
+                    '_' +
+                    new Date(endMs).toISOString().replace(/[-:TZ.]/g, '').slice(0, 14) +
+                    '.csv';
+                const fileName = encodeURIComponent((options && options.fileName) || defaultName);
+
+                return request('/api/fulfillment/na/order/export', {
+                    method: 'POST',
+                    body: {
+                        search_condition: {
+                            condition_list: {
+                                time_order_created: {
+                                    value: [String(startMs), String(endMs)],
+                                },
+                            },
+                        },
+                        sort_info: String(sortInfo),
+                        file_name: fileName,
+                        file_type: Number(fileType),
+                    },
+                });
+            },
+
+            async getExportRecords() {
+                return request('/api/fulfillment/na/order/export_record/get', {
+                    method: 'POST',
+                    body: {},
+                });
+            },
+
+            async postDownload(fileKey, exportTaskId) {
+                if (!fileKey || !exportTaskId) {
+                    throw new Error('fileKey and exportTaskId are required');
+                }
+                return request('/api/fulfillment/na/order/download', {
+                    method: 'POST',
+                    body: {
+                        file_key: String(fileKey),
+                        export_task_id: String(exportTaskId),
+                    },
+                });
+            },
+
+            async waitExportAndGetDownloadUrl(exportTaskId, maxWaitMs, pollMs) {
+                const timeoutMs = Number(maxWaitMs) > 0 ? Number(maxWaitMs) : 180000;
+                const intervalMs = Number(pollMs) > 0 ? Number(pollMs) : 3000;
+                const start = Date.now();
+
+                while (Date.now() - start < timeoutMs) {
+                    const recordsRes = await this.getExportRecords();
+                    const records =
+                        recordsRes && recordsRes.data && Array.isArray(recordsRes.data.export_records)
+                            ? recordsRes.data.export_records
+                            : [];
+
+                    const row = records.find((x) => String(x.export_task_id) === String(exportTaskId));
+                    if (row && row.file_key && Number(row.download) === 1) {
+                        return this.postDownload(row.file_key, row.export_task_id);
+                    }
+
+                    await sleep(intervalMs);
+                }
+
+                throw new Error('EXPORT_WAIT_TIMEOUT task=' + exportTaskId);
+            },
+        };
     }
 
-    function updateDataCount() {
-        const el = document.querySelector("#data-count");
-        if (el) el.textContent = `已抓取：${tableData.length} 条`;
-    }
-
-    // ====== 实现可拖动功能 ======
-    function makeDraggable(el) {
-        let offsetX = 0;
-        let offsetY = 0;
-        let dragging = false;
-
-        el.addEventListener("mousedown", (e) => {
-            dragging = true;
-            offsetX = e.clientX - el.offsetLeft;
-            offsetY = e.clientY - el.offsetTop;
-            el.style.transition = "none";
-        });
-
-        document.addEventListener("mousemove", (e) => {
-            if (!dragging) return;
-            el.style.left = e.clientX - offsetX + "px";
-            el.style.top = e.clientY - offsetY + "px";
-        });
-
-        document.addEventListener("mouseup", () => {
-            dragging = false;
-        });
-    }
-
-    async function init() {
-        createFloatingPanel();
-        await initTableData()
-        await initWorkingState()
-        if (isWorking) {
-            showRunningOverlay();
+    function createReviewPanel(api) {
+        function ensureStyle() {
+            if (document.getElementById(REVIEW_PANEL_STYLE_ID)) {
+                return;
+            }
+            const style = document.createElement('style');
+            style.id = REVIEW_PANEL_STYLE_ID;
+            style.textContent = [
+                '#' + REVIEW_PANEL_ID + ' {',
+                'position: fixed;',
+                'top: 16px;',
+                'right: 16px;',
+                'width: min(980px, calc(100vw - 32px));',
+                'max-height: calc(100vh - 32px);',
+                'z-index: 2147483647;',
+                'background: #ffffff;',
+                'border: 1px solid #e5e7eb;',
+                'border-radius: 12px;',
+                'box-shadow: 0 12px 32px rgba(0, 0, 0, 0.16);',
+                'font: 13px/1.5 "TikTokText", "Segoe UI", "PingFang SC", sans-serif;',
+                'color: #161823;',
+                'overflow: hidden;',
+                '}',
+                '#' + REVIEW_PANEL_ID + ' * { box-sizing: border-box; }',
+                '#' + REVIEW_PANEL_ID + ' .seller-api-head {',
+                'display: flex;',
+                'justify-content: space-between;',
+                'align-items: center;',
+                'padding: 14px 18px;',
+                'background: #ffffff;',
+                'border-bottom: 1px solid #eef0f2;',
+                'color: #161823;',
+                '}',
+                '#' + REVIEW_PANEL_ID + ' .seller-api-title { font-size: 16px; font-weight: 700; }',
+                '#' + REVIEW_PANEL_ID + ' .seller-api-subtitle { font-size: 12px; color: #6b7280; margin-top: 2px; }',
+                '#' + REVIEW_PANEL_ID + ' .seller-api-close {',
+                'border: 1px solid #e5e7eb;',
+                'background: #ffffff;',
+                'color: #4b5563;',
+                'width: 32px;',
+                'height: 32px;',
+                'border-radius: 8px;',
+                'cursor: pointer;',
+                'font-size: 18px;',
+                '}',
+                '#' + REVIEW_PANEL_ID + ' .seller-api-body { padding: 16px 18px 18px; overflow: auto; max-height: calc(100vh - 88px); background: #fafafa; }',
+                '#' + REVIEW_PANEL_ID + ' .seller-api-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }',
+                '#' + REVIEW_PANEL_ID + ' .seller-api-field { display: flex; flex-direction: column; gap: 6px; }',
+                '#' + REVIEW_PANEL_ID + ' .seller-api-field-wide { grid-column: 1 / -1; }',
+                '#' + REVIEW_PANEL_ID + ' label { font-weight: 600; color: #374151; }',
+                '#' + REVIEW_PANEL_ID + ' input, #' + REVIEW_PANEL_ID + ' textarea {',
+                'width: 100%;',
+                'border: 1px solid #d1d5db;',
+                'border-radius: 8px;',
+                'padding: 10px 12px;',
+                'background: #ffffff;',
+                'color: #111827;',
+                '}',
+                '#' + REVIEW_PANEL_ID + ' input[name="reviewStartTime"], #' + REVIEW_PANEL_ID + ' input[name="reviewEndTime"] { font-variant-numeric: tabular-nums; }',
+                '#' + REVIEW_PANEL_ID + ' input[name="reviewStartTime"]::-webkit-datetime-edit-ampm-field, #' + REVIEW_PANEL_ID + ' input[name="reviewEndTime"]::-webkit-datetime-edit-ampm-field { display: none; }',
+                '#' + REVIEW_PANEL_ID + ' textarea { min-height: 88px; resize: vertical; font-family: Consolas, "Courier New", monospace; }',
+                '#' + REVIEW_PANEL_ID + ' .seller-api-stars { display: flex; gap: 10px; flex-wrap: wrap; padding: 8px 10px; border: 1px solid #d1d5db; border-radius: 8px; background: #fff; }',
+                '#' + REVIEW_PANEL_ID + ' .seller-api-star-item { display: inline-flex; align-items: center; gap: 4px; color: #111827; font-weight: 500; }',
+                '#' + REVIEW_PANEL_ID + ' .seller-api-star-item input { width: 14px; height: 14px; }',
+                '#' + REVIEW_PANEL_ID + ' .seller-api-actions { display: flex; gap: 10px; flex-wrap: wrap; margin: 16px 0 12px; }',
+                '#' + REVIEW_PANEL_ID + ' button[data-role="action"] {',
+                'border: 1px solid transparent;',
+                'border-radius: 8px;',
+                'padding: 10px 16px;',
+                'cursor: pointer;',
+                'font-weight: 600;',
+                '}',
+                '#' + REVIEW_PANEL_ID + ' .seller-api-primary { background: #fe2c55; color: #fff; }',
+                '#' + REVIEW_PANEL_ID + ' .seller-api-secondary { background: #fff; color: #111827; border-color: #d1d5db; }',
+                '#' + REVIEW_PANEL_ID + ' .seller-api-status {',
+                'min-height: 38px;',
+                'padding: 10px 12px;',
+                'border-radius: 8px;',
+                'background: #fff;',
+                'border: 1px solid #e5e7eb;',
+                'color: #374151;',
+                'margin-bottom: 12px;',
+                'white-space: pre-wrap;',
+                '}',
+                '#' + REVIEW_PANEL_ID + ' .seller-api-summary { margin-bottom: 12px; color: #4b5563; }',
+                '#' + REVIEW_PANEL_ID + ' table { width: 100%; border-collapse: collapse; }',
+                '#' + REVIEW_PANEL_ID + ' th, #' + REVIEW_PANEL_ID + ' td { padding: 8px 10px; border-bottom: 1px solid #eef0f2; text-align: left; vertical-align: top; }',
+                '#' + REVIEW_PANEL_ID + ' th { position: sticky; top: 0; background: #f8fafc; font-size: 12px; text-transform: uppercase; letter-spacing: 0.02em; color: #6b7280; }',
+                '#' + REVIEW_PANEL_ID + ' .seller-api-table-wrap { border: 1px solid #e5e7eb; border-radius: 8px; overflow: auto; max-height: 360px; background: #fff; }',
+                '@media (max-width: 720px) {',
+                '#' + REVIEW_PANEL_ID + ' { top: 8px; right: 8px; left: 8px; width: auto; max-height: calc(100vh - 16px); }',
+                '#' + REVIEW_PANEL_ID + ' .seller-api-grid { grid-template-columns: 1fr; }',
+                '}',
+            ].join('');
+            document.head.appendChild(style);
         }
-        updateDataCount()
-    }
 
-
-    // ====== 页面加载后初始化 ======
-    if (document.readyState === "loading") {
-        document.addEventListener("DOMContentLoaded", async () => {
-            await init()
-        });
-    } else {
-        await init()
-    }
-
-    window.addEventListener("load", async () => {
-        if (isWorking) {
-            showRunningOverlay();
-            console.log("运行中，继续执行")
-            await exportExcel()
+        function getExistingPanel() {
+            return document.getElementById(REVIEW_PANEL_ID);
         }
-    })
+
+        function setStatus(panel, message) {
+            panel.querySelector('[data-role="status"]').textContent = message;
+        }
+
+        function renderRows(panel, rows) {
+            const body = panel.querySelector('[data-role="tbody"]');
+            if (!rows.length) {
+                body.innerHTML = '<tr><td colspan="5">暂无数据</td></tr>';
+                return;
+            }
+            body.innerHTML = '';
+            const fragment = document.createDocumentFragment();
+            rows.forEach((row) => {
+                const tr = document.createElement('tr');
+                [row.order_id, row.product_id, row.review_time, row.reviews, row.rating].forEach(
+                    (value) => {
+                        const td = document.createElement('td');
+                        td.textContent = value === undefined || value === null ? '' : String(value);
+                        tr.appendChild(td);
+                    }
+                );
+                fragment.appendChild(tr);
+            });
+            body.appendChild(fragment);
+        }
+
+        function buildRequestOptions(panel) {
+            const starLevels = Array.from(
+                panel.querySelectorAll('input[name="starLevels"]:checked')
+            ).map((el) => Number(el.value));
+            const normalizedStart = normalizeDateBoundary(
+                panel.querySelector('[name="reviewStartTime"]').value,
+                false
+            );
+            const normalizedEnd = normalizeDateBoundary(
+                panel.querySelector('[name="reviewEndTime"]').value,
+                true
+            );
+            return {
+                reviewStartTime: normalizedStart,
+                reviewEndTime: normalizedEnd,
+                size: 50,
+                fuzzyParam: panel.querySelector('[name="fuzzyParam"]').value,
+                starLevels,
+                extraQueryParams: {},
+                extraBody: {},
+            };
+        }
+
+        function updateBusy(panel, busy) {
+            panel.querySelectorAll('button[data-role="action"]').forEach((button) => {
+                button.disabled = busy;
+                button.style.opacity = busy ? '0.65' : '1';
+            });
+        }
+
+        async function handleFetchAll(panel) {
+            updateBusy(panel, true);
+            setStatus(panel, '正在分页拉取全部数据...');
+            try {
+                const options = buildRequestOptions(panel);
+                const rows = await api.getAllReviewRows(options);
+                panel.__reviewRows = rows;
+                renderRows(panel, rows.slice(0, Math.min(rows.length, 200)));
+                panel.querySelector('[data-role="summary"]').textContent =
+                    '共抓取 ' + rows.length + ' 条' + (rows.length > 200 ? '，表格仅预览前 200 条' : '');
+                setStatus(panel, '查询成功，共 ' + rows.length + ' 条');
+                console.log('[sellerApi.reviewList all]', rows);
+            } catch (err) {
+                setStatus(panel, '查询失败: ' + (err && err.message ? err.message : String(err)));
+                throw err;
+            } finally {
+                updateBusy(panel, false);
+            }
+        }
+
+        async function handleExportCsv(panel) {
+            const rows = Array.isArray(panel.__reviewRows) ? panel.__reviewRows : [];
+            if (!rows.length) {
+                setStatus(panel, '没有可导出的数据，请先查询');
+                return;
+            }
+            const csv = reviewRowsToCsv(rows);
+            const stamp = new Date().toISOString().replace(/[-:TZ.]/g, '').slice(0, 14);
+            downloadTextFile('review_list_' + stamp + '.csv', csv, 'text/csv;charset=utf-8');
+            setStatus(panel, '已导出 ' + rows.length + ' 条');
+        }
+
+        function wireEvents(panel) {
+            panel.querySelector('[data-role="close"]').addEventListener('click', () => panel.remove());
+            panel.querySelector('[data-action="fetch-all"]').addEventListener('click', () => {
+                handleFetchAll(panel).catch((err) => console.error('[sellerApi.reviewList.all] error', err));
+            });
+            panel.querySelector('[data-action="export-csv"]').addEventListener('click', () => {
+                handleExportCsv(panel).catch((err) => console.error('[sellerApi.reviewExport] error', err));
+            });
+        }
+
+        function createPanelElement() {
+            const panel = document.createElement('div');
+            panel.id = REVIEW_PANEL_ID;
+            panel.innerHTML = [
+                '<div class="seller-api-head">',
+                '<div>',
+                '<div class="seller-api-title">TikTok 评论导出</div>',
+                '<div class="seller-api-subtitle">填写评论查询参数，导出 order_id、product_id、review_time、reviews、rating</div>',
+                '</div>',
+                '<button class="seller-api-close" data-role="close" type="button">×</button>',
+                '</div>',
+                '<div class="seller-api-body">',
+                '<div class="seller-api-grid">',
+                '<div class="seller-api-field"><label>开始日期</label><input name="reviewStartTime" type="datetime-local" lang="en-GB" step="1" value="' + defaultDateTimeBoundary(-7, false) + '"></div>',
+                '<div class="seller-api-field"><label>截止日期</label><input name="reviewEndTime" type="datetime-local" lang="en-GB" step="1" value="' + defaultDateTimeBoundary(0, true) + '"></div>',
+                '<div class="seller-api-field seller-api-field-wide"><label>搜索 Order Id、Product Name、ID、Username</label><input name="fuzzyParam" type="text" placeholder="输入关键词"></div>',
+                '<div class="seller-api-field seller-api-field-wide"><label>星级筛选</label><div class="seller-api-stars">'
+                + '<label class="seller-api-star-item"><input type="checkbox" name="starLevels" value="1" checked><span>1⭐</span></label>'
+                + '<label class="seller-api-star-item"><input type="checkbox" name="starLevels" value="2" checked><span>2⭐</span></label>'
+                + '<label class="seller-api-star-item"><input type="checkbox" name="starLevels" value="3" checked><span>3⭐</span></label>'
+                + '<label class="seller-api-star-item"><input type="checkbox" name="starLevels" value="4" checked><span>4⭐</span></label>'
+                + '<label class="seller-api-star-item"><input type="checkbox" name="starLevels" value="5" checked><span>5⭐</span></label>'
+                + '</div></div>',
+                '</div>',
+                '<div class="seller-api-actions">',
+                '<button class="seller-api-primary" data-role="action" data-action="fetch-all" type="button">查询全部</button>',
+                '<button class="seller-api-secondary" data-role="action" data-action="export-csv" type="button">导出 CSV</button>',
+                '</div>',
+                '<div class="seller-api-status" data-role="status">准备就绪</div>',
+                '<div class="seller-api-summary" data-role="summary">尚未查询</div>',
+                '<div class="seller-api-table-wrap">',
+                '<table>',
+                '<thead><tr><th>order_id</th><th>product_id</th><th>review_time</th><th>reviews</th><th>rating</th></tr></thead>',
+                '<tbody data-role="tbody"><tr><td colspan="5">暂无数据</td></tr></tbody>',
+                '</table>',
+                '</div>',
+                '</div>',
+            ].join('');
+            return panel;
+        }
+
+        return {
+            open() {
+                ensureStyle();
+                const existing = getExistingPanel();
+                if (existing) {
+                    existing.style.display = 'block';
+                    return existing;
+                }
+                const panel = createPanelElement();
+                wireEvents(panel);
+                document.body.appendChild(panel);
+                return panel;
+            },
+        };
+    }
+
+    const sellerApi = createSellerApi();
+    const sellerApiReviewGui = createReviewPanel(sellerApi);
+    pageWindow.sellerApi = sellerApi;
+    pageWindow.sellerApiReviewGui = sellerApiReviewGui;
+
+    GM_registerMenuCommand('评论导出面板', () => {
+        sellerApiReviewGui.open();
+    });
+
+    console.log('[sellerApi] ready', sellerApi.env);
 })();
