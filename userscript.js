@@ -6,6 +6,7 @@
 // @author       you
 // @match        https://seller-us.tiktok.com/*
 // @match        https://seller.tiktokshopglobalselling.com/*
+// @match        https://seller.us.tiktokshopglobalselling.com/*
 // @grant        GM_registerMenuCommand
 // @grant        unsafeWindow
 // ==/UserScript==
